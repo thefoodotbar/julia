@@ -9,7 +9,7 @@ struct FloatIterator{T} end
 function Base.iterate(it::FloatIterator{T}, el=T(-Inf)) where T
     return el == T(Inf) ? nothing : (el, nextfloat(el))
 end
-Base.length(::FloatIterator{Float16}) = 2^16 - 2^11
+Base.length(::FloatIterator{Float16}) = 2^16 - 2^11 + 1
 
 @testset "comparisons" begin
     @test f >= g
@@ -81,10 +81,13 @@ end
 @testset "unary ops" begin
     @test -f === Float16(-2.)
     @test Float16(0.5f0)^2 ≈ Float16(0.5f0^2)
-    for func in (sin,cos,tan,asin,acos,atan,sinh,cosh,tanh,asinh,acosh,atanh,
-                 exp,exp2,exp10,expm1,log,log2,log10,log1p,sqrt,cbrt)
+    @testset "$func" for func in (sin,cos,tan,asin,acos,atan,
+                                  sinh,cosh,tanh,asinh,acosh,atanh,
+                                  exp,exp2,exp10,expm1,log,log2,log10,log1p,
+                                  sqrt,cbrt)
         for x in FloatIterator{Float16}()
-            @test try func(x) === Float16(func(widen(x))) catch; true end
+             @test try func(x) === Float16(func(Float64(x))) catch; true end
+
         end
     end
 end
