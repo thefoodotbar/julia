@@ -1059,7 +1059,16 @@ function abstract_call_known(interp::AbstractInterpreter, @nospecialize(f),
 end
 
 function abstract_call_opaque_closure(interp::AbstractInterpreter, closure::PartialOpaque, argtypes::Vector{Any}, sv::InferenceState)
-    return CallMeta(Any, nothing)
+    pushfirst!(argtypes, closure.env)
+    sig = argtypes_to_type(argtypes)
+    rt, edgecycle, edge = abstract_call_method(interp, closure.source::Method, sig, Core.svec(), false, sv)
+    if !edgecycle
+        const_rettype = abstract_call_method_with_const_args(interp, rt, closure, argtypes, MethodMatch(sig, Core.svec(), closure.source::Method, false), sv, edgecycle)
+        if const_rettype ⊑ rt
+           rt = const_rettype
+        end
+    end
+    return CallMeta(rt, edge)
 end
 
 function most_general_argtypes(closure::PartialOpaque)
@@ -1069,7 +1078,7 @@ function most_general_argtypes(closure::PartialOpaque)
     if !isa(argt, DataType) || argt.name !== typename(Tuple)
         argt = Tuple
     end
-    return most_general_argtypes(closure.source, argt, closure.isva)
+    return most_general_argtypes(closure.source, argt, closure.isva, false)
 end
 
 # call where the function is any lattice element
@@ -1084,7 +1093,7 @@ function abstract_call(interp::AbstractInterpreter, fargs::Union{Nothing,Vector{
     elseif isa(ft, DataType) && isdefined(ft, :instance)
         f = ft.instance
     elseif isa(ft, PartialOpaque)
-        return abstract_call_opaque_closure(interp, ft, argtypes, sv)
+        return abstract_call_opaque_closure(interp, ft, argtypes[2:end], sv)
     elseif isa(unwrap_unionall(ft), DataType) && unwrap_unionall(ft).name === typename(Core.OpaqueClosure)
         return CallMeta(rewrap_unionall(unwrap_unionall(ft).parameters[2], ft), false)
     else

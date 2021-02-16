@@ -46,11 +46,11 @@ function matching_cache_argtypes(linfo::MethodInstance, given_argtypes::Vector)
 end
 
 function most_general_argtypes(method::Union{Method, Nothing}, @nospecialize(specTypes),
-    isva::Bool)
+    isva::Bool, withfirst::Bool = true)
     toplevel = method === nothing
     linfo_argtypes = Any[unwrap_unionall(specTypes).parameters...]
     nargs::Int = toplevel ? 0 : method.nargs
-    if !toplevel && method.is_for_opaque_closure
+    if !withfirst
         # For opaque closure, the closure environment is processed elsewhere
         nargs -= 1
     end
