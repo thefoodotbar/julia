@@ -2195,9 +2195,10 @@ void jl_init_types(void) JL_GC_DISABLED
     jl_method_type =
         jl_new_datatype(jl_symbol("Method"), core,
                         jl_any_type, jl_emptysvec,
-                        jl_perm_symsvec(24,
+                        jl_perm_symsvec(25,
                             "name",
                             "module",
+                            "external_mt",
                             "file",
                             "line",
                             "primary_world",
@@ -2220,9 +2221,10 @@ void jl_init_types(void) JL_GC_DISABLED
                             "pure",
                             "is_for_opaque_closure",
                             "aggressive_constprop"),
-                        jl_svec(24,
+                        jl_svec(25,
                             jl_symbol_type,
                             jl_module_type,
+                            jl_any_type,
                             jl_symbol_type,
                             jl_int32_type,
                             jl_ulong_type,
@@ -2433,7 +2435,7 @@ void jl_init_types(void) JL_GC_DISABLED
 #endif
     jl_svecset(jl_methtable_type->types, 10, jl_uint8_type);
     jl_svecset(jl_methtable_type->types, 11, jl_uint8_type);
-    jl_svecset(jl_method_type->types, 11, jl_method_instance_type);
+    jl_svecset(jl_method_type->types, 12, jl_method_instance_type);
     jl_svecset(jl_method_instance_type->types, 6, jl_code_instance_type);
     jl_svecset(jl_code_instance_type->types, 9, jl_voidpointer_type);
     jl_svecset(jl_code_instance_type->types, 10, jl_voidpointer_type);
