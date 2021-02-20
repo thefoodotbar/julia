@@ -154,7 +154,7 @@ On exotic variants of `BLAS` this function can fail, which is indicated by retur
 get_num_threads()::Union{Int, Nothing} = _get_num_threads()
 
 function _get_num_threads()::Union{Int, Nothing}
-    return Int(ccall((lbt_get_num_threads, libblas), Cint, ()))
+    return Int(ccall((:lbt_get_num_threads, libblas), Cint, ()))
 end
 
 const _testmat = [1.0 0.0; 0.0 -1.0]
