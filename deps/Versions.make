@@ -75,7 +75,7 @@ OBJCONV_JLL_NAME := Objconv
 OBJCONV_JLL_VER  := 2.49.1+0
 
 # blastrampoline
-BLASTRAMPOLINE_VER := 2.0.0
+BLASTRAMPOLINE_VER := 2.2.0
 BLASTRAMPOLINE_JLL_NAME := libblastrampoline
 
 # OpenBLAS

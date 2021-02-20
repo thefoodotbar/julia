@@ -425,7 +425,7 @@ end
 
 
 function versioninfo(io::IO=stdout)
-    if Base.libblas_name == "libopenblas" || BLAS.vendor() === :openblas || BLAS.vendor() === :openblas64
+    if BLAS.vendor() === :openblas || BLAS.vendor() === :openblas64
         openblas_config = BLAS.openblas_get_config()
         println(io, "BLAS: libopenblas (", openblas_config, ")")
     else
@@ -434,30 +434,28 @@ function versioninfo(io::IO=stdout)
     println(io, "LAPACK: ",Base.liblapack_name)
 end
 
-function get_blas_lapack_path()
+function path_or_nothing(path, lib)
     shlib_ext = string(".", Libdl.dlext)
-    libblas_path = joinpath(Sys.BINDIR, Base.LIBDIR, "julia", string(Base.libblas_name, shlib_ext))
-    if !isfile(libblas_path)
-        libblas_path = joinpath(Sys.BINDIR, Base.LIBDIR, string(Base.libblas_name, shlib_ext))
-        if !isfile(libblas_path)
-            libblas_path = joinpath(Sys.BINDIR, string(Base.libblas_name, shlib_ext))
-            if !isfile(libblas_path)
-                error("Cannot find BLAS at ", libblas_path)
-            end
-        end
-    end
-    liblapack_path = joinpath(Sys.BINDIR, Base.LIBDIR, "julia", string(Base.liblapack_name, shlib_ext))
-    if !isfile(liblapack_path)
-        liblapack_path = joinpath(Sys.BINDIR, Base.LIBDIR, string(Base.liblapack_name, shlib_ext))
-        if !isfile(liblapack_path)
-            liblapack_path = joinpath(Sys.BINDIR, string(Base.liblapack_name, shlib_ext))
-            if !isfile(liblapack_path)
-                error("Cannot find LAPACK at ", liblapack_path)
-            end
-        end
-    end
+    fullpath = joinpath(path, string(lib, shlib_ext))
+    isfile(fullpath) ? fullpath : nothing
+end
 
-    return (libblas_path, liblapack_path)
+function get_blas_lapack_path()
+    blas_path = something(path_or_nothing(joinpath(Sys.BINDIR, Base.LIBDIR, "julia"),
+                                          Base.libblas_name),
+                          path_or_nothing(joinpath(Sys.BINDIR, Base.LIBDIR),
+                                          Base.libblas_name),
+                          path_or_nothing(Sys.BINDIR, Base.libblas_name),
+                          )
+
+    lapack_path = something(path_or_nothing(joinpath(Sys.BINDIR, Base.LIBDIR, "julia"),
+                                            Base.liblapack_name),
+                            path_or_nothing(joinpath(Sys.BINDIR, Base.LIBDIR),
+                                            Base.liblapack_name),
+                            path_or_nothing(Sys.BINDIR, Base.liblapack_name),
+                            )
+
+    return (blas_path, lapack_path)
 end
 
 function set_blas_lapack_trampoline!(vendor, libblas_path, liblapack_path; verbose=0)

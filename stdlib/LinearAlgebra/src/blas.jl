@@ -92,16 +92,10 @@ else
     end
 end
 
-openblas_get_config() = strip(unsafe_string(ccall((@blasfunc(openblas_get_config), libblas), Ptr{UInt8}, () )))
-
-function guess_vendor()
-    ret = vendor()
-    if Sys.isapple() && (ret == :unknown)
-        ret = :osxblas
-    end
-    ret
+function openblas_get_config()
+    config = ccall((@blasfunc(openblas_get_config), Base.libblas_name), Ptr{UInt8}, ())
+    return strip(unsafe_string(config))
 end
-
 
 """
     set_num_threads(n::Integer)
@@ -131,31 +125,20 @@ on exotic variants of BLAS without error. Warnings will be raised instead.
 """
 set_num_threads(n)::Nothing = _set_num_threads(n)
 
-function _set_num_threads(n::Integer; _blas = guess_vendor())
-    if _blas === :openblas || _blas == :openblas64
-        return ccall((@blasfunc(openblas_set_num_threads), libblas), Cvoid, (Cint,), n)
-    elseif _blas === :mkl
-        # MKL may let us set the number of threads in several ways
-        return ccall((@blasfunc(MKL_Set_Num_Threads), libblas), Cvoid, (Cint,), n)
-    elseif _blas === :osxblas
-        # OSX BLAS looks at an environment variable
-        ENV["VECLIB_MAXIMUM_THREADS"] = n
-    else
-        @assert _blas === :unknown
-        @warn "Failed to set number of BLAS threads." maxlog=1
-    end
+function _set_num_threads(n::Integer)
+    ccall((:lbt_set_num_threads, libblas), Cvoid, (Cint,), n)
     return nothing
 end
 
 _tryparse_env_int(key) = tryparse(Int, get(ENV, key, ""))
 
-function _set_num_threads(::Nothing; _blas = guess_vendor())
+function _set_num_threads(::Nothing)
     n = something(
         _tryparse_env_int("OPENBLAS_NUM_THREADS"),
         _tryparse_env_int("OMP_NUM_THREADS"),
         max(1, Sys.CPU_THREADS ÷ 2),
     )
-    _set_num_threads(n; _blas)
+    _set_num_threads(n)
 end
 
 """
@@ -170,24 +153,8 @@ On exotic variants of `BLAS` this function can fail, which is indicated by retur
 """
 get_num_threads()::Union{Int, Nothing} = _get_num_threads()
 
-function _get_num_threads(; _blas = guess_vendor())::Union{Int, Nothing}
-    if _blas === :openblas || _blas === :openblas64
-        return Int(ccall((@blasfunc(openblas_get_num_threads), libblas), Cint, ()))
-    elseif _blas === :mkl
-        return Int(ccall((@blasfunc(mkl_get_max_threads), libblas), Cint, ()))
-    elseif _blas === :osxblas
-        key = "VECLIB_MAXIMUM_THREADS"
-        nt = _tryparse_env_int(key)
-        if nt === nothing
-            @warn "Failed to read environment variable $key" maxlog=1
-        else
-            return nt
-        end
-    else
-        @assert _blas === :unknown
-    end
-    @warn "Could not get number of BLAS threads. Returning `nothing` instead." maxlog=1
-    return nothing
+function _get_num_threads()::Union{Int, Nothing}
+    return Int(ccall((lbt_get_num_threads, libblas), Cint, ()))
 end
 
 const _testmat = [1.0 0.0; 0.0 -1.0]
@@ -211,10 +178,6 @@ function check()
             println("Quitting.")
             exit()
         end
-    elseif blas === :mkl
-        if Base.USE_BLAS64
-            ENV["MKL_INTERFACE_LAYER"] = "ILP64"
-        end
     end
 
     #
@@ -229,6 +192,8 @@ function check()
         else
             error("The LAPACK library produced an undefined error code. Please verify the installation of BLAS and LAPACK.")
         end
+        println("Quitting.")
+        exit()
     end
 
 end
