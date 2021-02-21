@@ -75,11 +75,10 @@ import Libdl
 
 _vendor = :unknown
 
-vendor() = _vendor
+vendor() = _vendor::Symbol
 
-function set_vendor!(v)
-    global _vendor
-    _vendor = v
+function set_vendor!(v::Symbol)
+    global _vendor = v
 end
 
 if USE_BLAS64
