@@ -62,23 +62,34 @@ export
     trsm!,
     trsm
 
-
-const libblas = "libblastrampoline"
-const liblapack = "libblastrampoline"
+# Eventually this will be replaced with `libblastrampoline_jll.libblastrampoline`
+const libblastrampoline = "libblastrampoline"
+libblastrampoline_handle = C_NULL
 
 import LinearAlgebra
 import LinearAlgebra: BlasReal, BlasComplex, BlasFloat, BlasInt, DimensionMismatch, checksquare, stride1, chkstride1, axpy!
 
-import Libdl
+include("lbt.jl")
 
-# utility routines
+"""
+get_config()
 
-_vendor = :unknown
+Return an object representing the current `libblastrampoline` configuration.
 
-vendor() = _vendor::Symbol
+!!! compat "Julia 1.7"
+    `get_config()` requires at least Julia 1.7.
+"""
+get_config() = lbt_get_config()
 
-function set_vendor!(v::Symbol)
-    global _vendor = v
+# We hard-lock `vendor()` to `openblas(64)` here to satisfy older code, but all new code should use
+# `get_config()` since it is now possible to have multiple vendors loaded at once.
+function vendor()
+    Base.depwarn("vendor() is deprecated, use `BLAS.get_config()` and inspect the output instead", :vendor)
+    if USE_BLAS64
+        return :openblas64
+    else
+        return :openblas
+    end
 end
 
 if USE_BLAS64
@@ -91,10 +102,8 @@ else
     end
 end
 
-function openblas_get_config()
-    config = ccall((@blasfunc(openblas_get_config), Base.libblas_name), Ptr{UInt8}, ())
-    return strip(unsafe_string(config))
-end
+_tryparse_env_int(key) = tryparse(Int, get(ENV, key, ""))
+
 
 """
     set_num_threads(n::Integer)
@@ -103,41 +112,17 @@ end
 Set the number of threads the BLAS library should use equal to `n::Integer`.
 
 Also accepts `nothing`, in which case julia tries to guess the default number of threads.
-Passing `nothing` is discouraged and mainly exists for the following reason:
-
-On exotic variants of BLAS, `nothing` may be returned by `get_num_threads()`.
-Thus on exotic variants of BLAS, the following pattern may fail to set the number of threads:
-
-```julia
-old = get_num_threads()
-set_num_threads(1)
-@threads for i in 1:10
-    # single-threaded BLAS calls
-end
-set_num_threads(old)
-```
-Because `set_num_threads` accepts `nothing`, this code can still run
-on exotic variants of BLAS without error. Warnings will be raised instead.
-
-!!! compat "Julia 1.6"
-    `set_num_threads(::Nothing)` requires at least Julia 1.6.
+Passing `nothing` is discouraged and mainly exists for historical reasons.
 """
-set_num_threads(n)::Nothing = _set_num_threads(n)
-
-function _set_num_threads(n::Integer)
-    ccall((:lbt_set_num_threads, libblas), Cvoid, (Cint,), n)
-    return nothing
-end
-
-_tryparse_env_int(key) = tryparse(Int, get(ENV, key, ""))
-
-function _set_num_threads(::Nothing)
-    n = something(
+set_num_threads(nt::Integer)::Nothing = lbt_set_num_threads(Int32(nt))
+function set_num_threads(::Nothing)
+    nt = something(
         _tryparse_env_int("OPENBLAS_NUM_THREADS"),
         _tryparse_env_int("OMP_NUM_THREADS"),
+        _tryparse_env_int("VECLIB_MAXIMUM_THREADS"),
         max(1, Sys.CPU_THREADS ÷ 2),
     )
-    _set_num_threads(n)
+    return set_num_threads(nt)
 end
 
 """
@@ -145,56 +130,24 @@ end
 
 Get the number of threads the BLAS library is using.
 
-On exotic variants of `BLAS` this function can fail, which is indicated by returning `nothing`.
-
 !!! compat "Julia 1.6"
     `get_num_threads` requires at least Julia 1.6.
 """
-get_num_threads()::Union{Int, Nothing} = _get_num_threads()
+get_num_threads()::Int = lbt_get_num_threads()
 
-function _get_num_threads()::Union{Int, Nothing}
-    return Int(ccall((:lbt_get_num_threads, libblas), Cint, ()))
-end
-
-const _testmat = [1.0 0.0; 0.0 -1.0]
 function check()
-    blas = vendor()
-    if blas === :openblas || blas === :openblas64
-        openblas_config = openblas_get_config()
-        openblas64 = occursin(r".*USE64BITINT.*", openblas_config)
-        if Base.USE_BLAS64 != openblas64
-            if !openblas64
-                @error """
-                    OpenBLAS was not built with 64bit integer support.
-                    You're seeing this error because Julia was built with USE_BLAS64=1.
-                    Please rebuild Julia with USE_BLAS64=0"""
-            else
-                @error """
-                    Julia was not built with support for OpenBLAS with 64bit integer support.
-                    You're seeing this error because Julia was built with USE_BLAS64=0.
-                    Please rebuild Julia with USE_BLAS64=1"""
-            end
-            println("Quitting.")
-            exit()
-        end
-    end
+    # TODO: once we have bitfields of the BLAS functions that are actually forwarded,
+    # ensure that we have a complete set here (warning on an incomplete BLAS implementation)
+    config = get_config()
 
-    #
-    # Check if BlasInt is the expected bitsize, by triggering an error
-    #
-    (_, info) = LinearAlgebra.LAPACK.potrf!('U', _testmat)
-    if info != 2 # mangled info code
-        if info == 2^33
-            error("BLAS and LAPACK are compiled with 32-bit integer support, but Julia expects 64-bit integers. Please build Julia with USE_BLAS64=0.")
-        elseif info == 0
-            error("BLAS and LAPACK are compiled with 64-bit integer support but Julia expects 32-bit integers. Please build Julia with USE_BLAS64=1.")
-        else
-            error("The LAPACK library produced an undefined error code. Please verify the installation of BLAS and LAPACK.")
-        end
+    # Ensure that one of our loaded libraries satisfies our interface requirement
+    interface = Base.USE_BLAS64 ? :ilp64 : lp64
+    if !any(lib.interface == interface for lib in config.loaded_libs)
+        interfacestr = uppercase(string(interface))
+        @error("No loaded BLAS libraries were built with $(interfacestr) support")
         println("Quitting.")
         exit()
     end
-
 end
 
 
@@ -215,7 +168,7 @@ for (fname, elty) in ((:dcopy_,:Float64),
     @eval begin
         # SUBROUTINE DCOPY(N,DX,INCX,DY,INCY)
         function blascopy!(n::Integer, DX::Union{Ptr{$elty},AbstractArray{$elty}}, incx::Integer, DY::Union{Ptr{$elty},AbstractArray{$elty}}, incy::Integer)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}),
                  n, DX, incx, DY, incy)
             DY
@@ -237,12 +190,12 @@ first `n` elements of array `Y` with stride `incy`. Returns `X` and `Y`.
 """
 function rot! end
 
-for (fname, elty, cty, sty, lib) in ((:drot_, :Float64, :Float64, :Float64, libblas),
-                                     (:srot_, :Float32, :Float32, :Float32, libblas),
-                                     (:zdrot_, :ComplexF64, :Float64, :Float64, libblas),
-                                     (:csrot_, :ComplexF32, :Float32, :Float32, libblas),
-                                     (:zrot_, :ComplexF64, :Float64, :ComplexF64, liblapack),
-                                     (:crot_, :ComplexF32, :Float32, :ComplexF32, liblapack))
+for (fname, elty, cty, sty, lib) in ((:drot_, :Float64, :Float64, :Float64, libblastrampoline),
+                                     (:srot_, :Float32, :Float32, :Float32, libblastrampoline),
+                                     (:zdrot_, :ComplexF64, :Float64, :Float64, libblastrampoline),
+                                     (:csrot_, :ComplexF32, :Float32, :Float32, libblastrampoline),
+                                     (:zrot_, :ComplexF64, :Float64, :ComplexF64, libblastrampoline),
+                                     (:crot_, :ComplexF32, :Float32, :ComplexF32, libblastrampoline))
     @eval begin
         # SUBROUTINE DROT(N,DX,INCX,DY,INCY,C,S)
         function rot!(n::Integer, DX::Union{Ptr{$elty},AbstractArray{$elty}}, incx::Integer, DY::Union{Ptr{$elty},AbstractArray{$elty}}, incy::Integer, C::$cty, S::$sty)
@@ -277,7 +230,7 @@ for (fname, elty) in ((:dscal_,:Float64),
     @eval begin
         # SUBROUTINE DSCAL(N,DA,DX,INCX)
         function scal!(n::Integer, DA::$elty, DX::Union{Ptr{$elty},AbstractArray{$elty}}, incx::Integer)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                   (Ref{BlasInt}, Ref{$elty}, Ptr{$elty}, Ref{BlasInt}),
                   n, DA, DX, incx)
             DX
@@ -341,7 +294,7 @@ for (fname, elty) in ((:ddot_,:Float64),
                 # *     .. Array Arguments ..
                 #       DOUBLE PRECISION DX(*),DY(*)
         function dot(n::Integer, DX::Union{Ptr{$elty},AbstractArray{$elty}}, incx::Integer, DY::Union{Ptr{$elty},AbstractArray{$elty}}, incy::Integer)
-            ccall((@blasfunc($fname), libblas), $elty,
+            ccall((@blasfunc($fname), libblastrampoline), $elty,
                 (Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}),
                  n, DX, incx, DY, incy)
         end
@@ -358,7 +311,7 @@ for (fname, elty) in ((:cblas_zdotc_sub,:ComplexF64),
                 #       DOUBLE PRECISION DX(*),DY(*)
         function dotc(n::Integer, DX::Union{Ptr{$elty},AbstractArray{$elty}}, incx::Integer, DY::Union{Ptr{$elty},AbstractArray{$elty}}, incy::Integer)
             result = Ref{$elty}()
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (BlasInt, Ptr{$elty}, BlasInt, Ptr{$elty}, BlasInt, Ptr{$elty}),
                  n, DX, incx, DY, incy, result)
             result[]
@@ -376,7 +329,7 @@ for (fname, elty) in ((:cblas_zdotu_sub,:ComplexF64),
                 #       DOUBLE PRECISION DX(*),DY(*)
         function dotu(n::Integer, DX::Union{Ptr{$elty},AbstractArray{$elty}}, incx::Integer, DY::Union{Ptr{$elty},AbstractArray{$elty}}, incy::Integer)
             result = Ref{$elty}()
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (BlasInt, Ptr{$elty}, BlasInt, Ptr{$elty}, BlasInt, Ptr{$elty}),
                  n, DX, incx, DY, incy, result)
             result[]
@@ -434,7 +387,7 @@ for (fname, elty, ret_type) in ((:dnrm2_,:Float64,:Float64),
     @eval begin
         # SUBROUTINE DNRM2(N,X,INCX)
         function nrm2(n::Integer, X::Union{Ptr{$elty},AbstractArray{$elty}}, incx::Integer)
-            ccall((@blasfunc($fname), libblas), $ret_type,
+            ccall((@blasfunc($fname), libblastrampoline), $ret_type,
                 (Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}),
                  n, X, incx)
         end
@@ -471,7 +424,7 @@ for (fname, elty, ret_type) in ((:dasum_,:Float64,:Float64),
     @eval begin
         # SUBROUTINE ASUM(N, X, INCX)
         function asum(n::Integer, X::Union{Ptr{$elty},AbstractArray{$elty}}, incx::Integer)
-            ccall((@blasfunc($fname), libblas), $ret_type,
+            ccall((@blasfunc($fname), libblastrampoline), $ret_type,
                 (Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}),
                  n, X, incx)
         end
@@ -514,7 +467,7 @@ for (fname, elty) in ((:daxpy_,:Float64),
                 #*     .. Array Arguments ..
                 #      DOUBLE PRECISION DX(*),DY(*)
         function axpy!(n::Integer, alpha::($elty), dx::Union{Ptr{$elty}, AbstractArray{$elty}}, incx::Integer, dy::Union{Ptr{$elty}, AbstractArray{$elty}}, incy::Integer)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{BlasInt}, Ref{$elty}, Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}),
                  n, alpha, dx, incx, dy, incy)
             dy
@@ -583,7 +536,7 @@ for (fname, elty) in ((:daxpby_,:Float64), (:saxpby_,:Float32),
         function axpby!(n::Integer, alpha::($elty), dx::Union{Ptr{$elty},
                         AbstractArray{$elty}}, incx::Integer, beta::($elty),
                         dy::Union{Ptr{$elty}, AbstractArray{$elty}}, incy::Integer)
-            ccall((@blasfunc($fname), libblas), Cvoid, (Ref{BlasInt}, Ref{$elty}, Ptr{$elty},
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid, (Ref{BlasInt}, Ref{$elty}, Ptr{$elty},
                 Ref{BlasInt}, Ref{$elty}, Ptr{$elty}, Ref{BlasInt}),
                 n, alpha, dx, incx, beta, dy, incy)
             dy
@@ -606,7 +559,7 @@ for (fname, elty) in ((:idamax_,:Float64),
                       (:icamax_,:ComplexF32))
     @eval begin
         function iamax(n::Integer, dx::Union{Ptr{$elty}, AbstractArray{$elty}}, incx::Integer)
-            ccall((@blasfunc($fname), libblas),BlasInt,
+            ccall((@blasfunc($fname), libblastrampoline),BlasInt,
                 (Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}),
                 n, dx, incx)
         end
@@ -651,7 +604,7 @@ for (fname, elty) in ((:dgemv_,:Float64),
                 throw(DimensionMismatch("the transpose of A has dimensions $n, $m, X has length $(length(X)) and Y has length $(length(Y))"))
             end
             chkstride1(A)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt}, Ref{$elty},
                  Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt},
                  Ref{$elty}, Ptr{$elty}, Ref{BlasInt}, Clong),
@@ -731,7 +684,7 @@ for (fname, elty) in ((:dgbmv_,:Float64),
                        y::AbstractVector{$elty})
             require_one_based_indexing(A, x, y)
             chkstride1(A)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt}, Ref{BlasInt},
                  Ref{BlasInt}, Ref{$elty}, Ptr{$elty}, Ref{BlasInt},
                  Ptr{$elty}, Ref{BlasInt}, Ref{$elty}, Ptr{$elty},
@@ -763,10 +716,10 @@ Only the [`ul`](@ref stdlib-blas-uplo) triangle of `A` is used.
 """
 function symv! end
 
-for (fname, elty, lib) in ((:dsymv_,:Float64,libblas),
-                           (:ssymv_,:Float32,libblas),
-                           (:zsymv_,:ComplexF64,liblapack),
-                           (:csymv_,:ComplexF32,liblapack))
+for (fname, elty, lib) in ((:dsymv_,:Float64,libblastrampoline),
+                           (:ssymv_,:Float32,libblastrampoline),
+                           (:zsymv_,:ComplexF64,libblastrampoline),
+                           (:csymv_,:ComplexF32,libblastrampoline))
     # Note that the complex symv are not BLAS but auiliary functions in LAPACK
     @eval begin
              #      SUBROUTINE DSYMV(UPLO,N,ALPHA,A,LDA,X,INCX,BETA,Y,INCY)
@@ -855,7 +808,7 @@ for (fname, elty) in ((:zhemv_,:ComplexF64),
             lda = max(1, stride(A, 2))
             incx = stride(x, 1)
             incy = stride(y, 1)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{BlasInt}, Ref{$elty}, Ptr{$elty},
                  Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}, Ref{$elty},
                  Ptr{$elty}, Ref{BlasInt}, Clong),
@@ -912,7 +865,7 @@ for (fname, elty) in ((:zhpmv_, :ComplexF64),
                        y::Union{Ptr{$elty}, AbstractArray{$elty}},
                        incy::Integer)
 
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                   (Ref{UInt8},     # uplo,
                    Ref{BlasInt},   # n,
                    Ref{$elty},     # α,
@@ -990,7 +943,7 @@ for (fname, elty) in ((:dsbmv_,:Float64),
         function sbmv!(uplo::AbstractChar, k::Integer, alpha::($elty), A::AbstractMatrix{$elty}, x::AbstractVector{$elty}, beta::($elty), y::AbstractVector{$elty})
             require_one_based_indexing(A, x, y)
             chkstride1(A)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt}, Ref{$elty},
                  Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt},
                  Ref{$elty}, Ptr{$elty}, Ref{BlasInt}, Clong),
@@ -1062,7 +1015,7 @@ for (fname, elty) in ((:dspmv_, :Float64),
                        y::Union{Ptr{$elty}, AbstractArray{$elty}},
                        incy::Integer)
 
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                   (Ref{UInt8},     # uplo,
                    Ref{BlasInt},   # n,
                    Ref{$elty},     # α,
@@ -1140,7 +1093,7 @@ for (fname, elty) in ((:zhbmv_,:ComplexF64),
         function hbmv!(uplo::AbstractChar, k::Integer, alpha::($elty), A::AbstractMatrix{$elty}, x::AbstractVector{$elty}, beta::($elty), y::AbstractVector{$elty})
             require_one_based_indexing(A, x, y)
             chkstride1(A)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt}, Ref{$elty},
                  Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt},
                  Ref{$elty}, Ptr{$elty}, Ref{BlasInt}, Clong),
@@ -1200,7 +1153,7 @@ for (fname, elty) in ((:dtrmv_,:Float64),
                 throw(DimensionMismatch("A has size ($n,$n), x has length $(length(x))"))
             end
             chkstride1(A)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{UInt8}, Ref{UInt8}, Ref{BlasInt},
                  Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt},
                  Clong, Clong, Clong),
@@ -1255,7 +1208,7 @@ for (fname, elty) in ((:dtrsv_,:Float64),
                 throw(DimensionMismatch("size of A is $n != length(x) = $(length(x))"))
             end
             chkstride1(A)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{UInt8}, Ref{UInt8}, Ref{BlasInt},
                  Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt},
                  Clong, Clong, Clong),
@@ -1289,7 +1242,7 @@ for (fname, elty) in ((:dger_,:Float64),
             if m != length(x) || n != length(y)
                 throw(DimensionMismatch("A has size ($m,$n), x has length $(length(x)), y has length $(length(y))"))
             end
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{BlasInt}, Ref{BlasInt}, Ref{$elty}, Ptr{$elty},
                  Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}, Ptr{$elty},
                  Ref{BlasInt}),
@@ -1311,10 +1264,10 @@ Rank-1 update of the symmetric matrix `A` with vector `x` as `alpha*x*transpose(
 """
 function syr! end
 
-for (fname, elty, lib) in ((:dsyr_,:Float64,libblas),
-                           (:ssyr_,:Float32,libblas),
-                           (:zsyr_,:ComplexF64,liblapack),
-                           (:csyr_,:ComplexF32,liblapack))
+for (fname, elty, lib) in ((:dsyr_,:Float64,libblastrampoline),
+                           (:ssyr_,:Float32,libblastrampoline),
+                           (:zsyr_,:ComplexF64,libblastrampoline),
+                           (:csyr_,:ComplexF32,libblastrampoline))
     @eval begin
         function syr!(uplo::AbstractChar, α::$elty, x::AbstractVector{$elty}, A::AbstractMatrix{$elty})
             require_one_based_indexing(A, x)
@@ -1352,7 +1305,7 @@ for (fname, elty, relty) in ((:zher_,:ComplexF64, :Float64),
             if length(x) != n
                 throw(DimensionMismatch("A has size ($n,$n), x has length $(length(x))"))
             end
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{BlasInt}, Ref{$relty}, Ptr{$elty},
                  Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}, Clong),
                  uplo, n, α, x,
@@ -1405,7 +1358,7 @@ for (gemm, elty) in
             chkstride1(A)
             chkstride1(B)
             chkstride1(C)
-            ccall((@blasfunc($gemm), libblas), Cvoid,
+            ccall((@blasfunc($gemm), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt},
                  Ref{BlasInt}, Ref{$elty}, Ptr{$elty}, Ref{BlasInt},
                  Ptr{$elty}, Ref{BlasInt}, Ref{$elty}, Ptr{$elty},
@@ -1468,7 +1421,7 @@ for (mfname, elty) in ((:dsymm_,:Float64),
             chkstride1(A)
             chkstride1(B)
             chkstride1(C)
-            ccall((@blasfunc($mfname), libblas), Cvoid,
+            ccall((@blasfunc($mfname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt},
                  Ref{$elty}, Ptr{$elty}, Ref{BlasInt}, Ptr{$elty},
                  Ref{BlasInt}, Ref{$elty}, Ptr{$elty}, Ref{BlasInt},
@@ -1541,7 +1494,7 @@ for (mfname, elty) in ((:zhemm_,:ComplexF64),
             chkstride1(A)
             chkstride1(B)
             chkstride1(C)
-            ccall((@blasfunc($mfname), libblas), Cvoid,
+            ccall((@blasfunc($mfname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt},
                  Ref{$elty}, Ptr{$elty}, Ref{BlasInt}, Ptr{$elty},
                  Ref{BlasInt}, Ref{$elty}, Ptr{$elty}, Ref{BlasInt},
@@ -1630,7 +1583,7 @@ for (fname, elty) in ((:dsyrk_,:Float64),
            k  = size(A, trans == 'N' ? 2 : 1)
            chkstride1(A)
            chkstride1(C)
-           ccall((@blasfunc($fname), libblas), Cvoid,
+           ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                  (Ref{UInt8}, Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt},
                   Ref{$elty}, Ptr{$elty}, Ref{BlasInt}, Ref{$elty},
                   Ptr{$elty}, Ref{BlasInt}, Clong, Clong),
@@ -1688,7 +1641,7 @@ for (fname, elty, relty) in ((:zherk_, :ComplexF64, :Float64),
            chkstride1(A)
            chkstride1(C)
            k  = size(A, trans == 'N' ? 2 : 1)
-           ccall((@blasfunc($fname), libblas), Cvoid,
+           ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                  (Ref{UInt8}, Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt},
                   Ref{$relty}, Ptr{$elty}, Ref{BlasInt}, Ref{$relty},
                   Ptr{$elty}, Ref{BlasInt}, Clong, Clong),
@@ -1731,7 +1684,7 @@ for (fname, elty) in ((:dsyr2k_,:Float64),
             chkstride1(A)
             chkstride1(B)
             chkstride1(C)
-            ccall((@blasfunc($fname), libblas), Cvoid,
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt},
                  Ref{$elty}, Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}, Ref{$elty},
                  Ptr{$elty}, Ref{BlasInt}, Clong, Clong),
@@ -1798,7 +1751,7 @@ for (fname, elty1, elty2) in ((:zher2k_,:ComplexF64,:Float64), (:cher2k_,:Comple
            chkstride1(B)
            chkstride1(C)
            k  = size(A, trans == 'N' ? 2 : 1)
-           ccall((@blasfunc($fname), libblas), Cvoid,
+           ccall((@blasfunc($fname), libblastrampoline), Cvoid,
                  (Ref{UInt8}, Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt},
                   Ref{$elty1}, Ptr{$elty1}, Ref{BlasInt}, Ptr{$elty1}, Ref{BlasInt},
                   Ref{$elty2},  Ptr{$elty1}, Ref{BlasInt}, Clong, Clong),
@@ -1912,7 +1865,7 @@ for (mmname, smname, elty) in
             end
             chkstride1(A)
             chkstride1(B)
-            ccall((@blasfunc($mmname), libblas), Cvoid,
+            ccall((@blasfunc($mmname), libblastrampoline), Cvoid,
                   (Ref{UInt8}, Ref{UInt8}, Ref{UInt8}, Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt},
                    Ref{$elty}, Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt},
                    Clong, Clong, Clong, Clong),
@@ -1942,7 +1895,7 @@ for (mmname, smname, elty) in
             end
             chkstride1(A)
             chkstride1(B)
-            ccall((@blasfunc($smname), libblas), Cvoid,
+            ccall((@blasfunc($smname), libblastrampoline), Cvoid,
                 (Ref{UInt8}, Ref{UInt8}, Ref{UInt8}, Ref{UInt8},
                  Ref{BlasInt}, Ref{BlasInt}, Ref{$elty}, Ptr{$elty},
                  Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt},

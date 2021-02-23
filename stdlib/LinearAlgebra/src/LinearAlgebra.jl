@@ -425,59 +425,66 @@ end
 
 
 function versioninfo(io::IO=stdout)
-    if BLAS.vendor() === :openblas || BLAS.vendor() === :openblas64
-        openblas_config = BLAS.openblas_get_config()
-        println(io, "BLAS: libopenblas (", openblas_config, ")")
-    else
-        println(io, "BLAS: ",Base.libblas_name)
+    config = BLAS.get_config()
+    println(io, "BLAS: $(BLAS.libblastrampoline) ($(join(string.(config.build_flags), ", ")))")
+    for lib in config.loaded_libs
+        println(io, " --> $(lib.libname) ($(uppercase(string(lib.interface))))")
     end
-    println(io, "LAPACK: ",Base.liblapack_name)
+    return nothing
 end
 
-function path_or_nothing(path, lib)
+function find_blas_library(name)
     shlib_ext = string(".", Libdl.dlext)
-    fullpath = joinpath(path, string(lib, shlib_ext))
-    isfile(fullpath) ? fullpath : nothing
+    if !endswith(name, shlib_ext)
+        name_ext = string(name, shlib_ext)
+    end
+
+    # On windows, we look in `bin` and never in `lib`
+    @static if Sys.iswindows()
+        path = joinpath(Sys.BINDIR, name_ext)
+        if isfile(path)
+            return path
+        end
+    else
+        # On other platforms, we check `lib/julia` first, and if that doesn't exist, `lib`.
+        path = joinpath(Sys.BINDIR, Base.LIBDIR, "julia", name_ext)
+        if isfile(path)
+            return path
+        end
+
+        path = joinpath(Sys.BINDIR, Base.LIBDIR, name_ext)
+        if isfile(path)
+            return path
+        end
+    end
+
+    # If we can't find it by absolute path, we'll try just passing this straight through to `dlopen()`
+    return name
 end
 
 function get_blas_lapack_path()
-    blas_path = something(path_or_nothing(joinpath(Sys.BINDIR, Base.LIBDIR, "julia"),
-                                          Base.libblas_name),
-                          path_or_nothing(joinpath(Sys.BINDIR, Base.LIBDIR),
-                                          Base.libblas_name),
-                          path_or_nothing(Sys.BINDIR, Base.libblas_name),
-                          )
-
-    lapack_path = something(path_or_nothing(joinpath(Sys.BINDIR, Base.LIBDIR, "julia"),
-                                            Base.liblapack_name),
-                            path_or_nothing(joinpath(Sys.BINDIR, Base.LIBDIR),
-                                            Base.liblapack_name),
-                            path_or_nothing(Sys.BINDIR, Base.liblapack_name),
-                            )
-
+    blas_path = find_blas_library(Base.liblapack_name)
+    lapack_path = find_blas_library(Base.liblapack_name)
     return (blas_path, lapack_path)
 end
 
-function set_blas_lapack_trampoline!(vendor, libblas_path, liblapack_path; verbose=0)
-    BLAS.set_vendor!(vendor)
-    ccall((:lbt_forward, "libblastrampoline"), Cvoid, (Cstring,Cint,Cint), libblas_path, 1, verbose)
-    if liblapack_path != libblas_path
-        ccall((:lbt_forward, "libblastrampoline"), Cvoid, (Cstring,Cint,Cint), liblapack_path, 0, verbose)
-    end
-end
-
 function __init__()
-     try
-         libblas_path, liblapack_path = get_blas_lapack_path()
-         vendor = Base.USE_BLAS64 ? :openblas64 : :openblas
-         set_blas_lapack_trampoline!(vendor, libblas_path, liblapack_path)
- 	 BLAS.check()
-         Threads.resize_nthreads!(Abuf)
-         Threads.resize_nthreads!(Bbuf)
-         Threads.resize_nthreads!(Cbuf)
+    # Eventually, this will be provided via libblastrampoline_jll
+    libblastrampoline_handle = Libdl.dlopen(BLAS.libblastrampoline)
+
+    try
+        libblas_path = find_blas_library(Base.libblas_name)
+        liblapack_path = find_blas_library(Base.liblapack_name)
+        BLAS.lbt_forward(libblas_path; clear=true)
+        if liblapack_path != libblas_path
+            BLAS.lbt_forward(liblapack_path)
+        end
+        BLAS.check()
+        Threads.resize_nthreads!(Abuf)
+        Threads.resize_nthreads!(Bbuf)
+        Threads.resize_nthreads!(Cbuf)
      catch ex
-         Base.showerror_nostdio(ex,
-             "WARNING: Error during initialization of module LinearAlgebra")
+        Base.showerror_nostdio(ex, "WARNING: Error during initialization of module LinearAlgebra")
      end
      # register a hook to disable BLAS threading
      Base.at_disable_library_threading(() -> BLAS.set_num_threads(1))
